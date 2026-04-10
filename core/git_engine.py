@@ -9,7 +9,6 @@ class GitForensics:
     def __init__(self, repo_url):
         """Initialize using GitHub API instead of local cloning"""
         # Parse URL to get owner and repo name
-        # Handles https://github.com/owner/repo.git
         parts = repo_url.rstrip('/').replace('.git', '').split('/')
         self.owner = parts[-2]
         self.repo_name = parts[-1]
@@ -32,7 +31,7 @@ class GitForensics:
         """Comprehensive API-based repository analysis"""
         print(f"🌐 [API Miner] Analyzing {self.owner}/{self.repo_name}...")
         
-        # 1. Fetch recent commits (last 50 for speed)
+        # 1. Fetch recent commits
         commits = self._get("/commits?per_page=50")
         raw_history = []
         hotspots = {}
@@ -43,23 +42,20 @@ class GitForensics:
             for c in commits:
                 msg = c['commit']['message']
                 date_str = c['commit']['author']['date']
-                # ISO to Aware Datetime
                 date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
                 
-                # Check for bugs
                 is_bug = any(ind in msg.lower() for ind in bug_indicators)
                 if is_bug:
                     bug_commits_count += 1
                 
+                # We keep the raw message here so the sanitizer can see it later
                 raw_history.append({
                     'date': date_obj, 
                     'msg': msg, 
-                    'num_files': 1 # API default
+                    'num_files': 1 
                 })
                 
-                # Identify Hotspots (Files changed in this commit)
-                # Note: This requires a second call per commit to be accurate
-                # For demo speed, we sample the top 5 commits' files
+                # Sample hotspots from the latest commits
                 if len(raw_history) <= 5:
                     detail = self._get(f"/commits/{c['sha']}")
                     if detail:
@@ -67,10 +63,10 @@ class GitForensics:
                             path = f['filename']
                             hotspots[path] = hotspots.get(path, 0) + 1
 
-        # 2. Sanitize logs for AI
+        # 2. Sanitize logs for AI (This is where the Sanitizer Agent will look)
         sanitized = self.sanitize_logs(raw_history)
 
-        # 3. Complexity (Analyze top 3 hotspot files in-memory)
+        # 3. Complexity analysis
         avg_cc = self._get_complexity_via_api(hotspots)
 
         return {
@@ -78,7 +74,7 @@ class GitForensics:
             "overall_complexity": {"avg_cc": avg_cc},
             "deployment_frequency": self.analyze_deployment_frequency(raw_history),
             "bug_patterns": {"total_bug_fixes": bug_commits_count},
-            "sanitized_history": sanitized
+            "sanitized_history": sanitized # <--- The Sanitizer Agent scans this list
         }
 
     def _get_complexity_via_api(self, hotspots):
@@ -88,14 +84,12 @@ class GitForensics:
         count = 0
         
         for path, _ in top_files:
-            # Skip non-code files
             if not path.endswith(('.py', '.js', '.ts', '.java')):
                 continue
                 
             content_data = self._get(f"/contents/{path}")
             if content_data and 'content' in content_data:
                 try:
-                    # GitHub API returns content in Base64
                     code = base64.b64decode(content_data['content']).decode('utf-8', errors='ignore')
                     results = cc_visit(code)
                     total_cc += sum([r.complexity for r in results])
@@ -105,24 +99,25 @@ class GitForensics:
         return round(total_cc / max(count, 1), 2)
 
     def sanitize_logs(self, raw_commits):
-        """Filters out noise to maximize AI reasoning signal."""
+        """Pre-processes logs. NOTE: We keep the message intact so the Sanitizer Agent can scan for keys."""
         sanitized_data = []
-        noise_patterns = [r"merge branch", r"merge pull request", r"chore:", r"docs:", r"style:", r"readme"]
+        # We removed 'readme' and 'docs' from noise so we don't accidentally skip a leak in those files
+        noise_patterns = [r"merge branch", r"merge pull request"]
         
         for commit in raw_commits:
-            msg = commit['msg'].lower()
-            if any(re.search(pattern, msg) for pattern in noise_patterns):
+            msg = commit['msg'] # Keep original casing for token detection
+            if any(re.search(pattern, msg.lower()) for pattern in noise_patterns):
                 continue
             
             sanitized_data.append({
                 "date": str(commit['date']),
-                "impact": msg.strip(),
-                "files_changed": commit['num_files']
+                "message": msg, # <--- Changed from 'impact' to 'message' for clarity
+                "files_count": commit['num_files']
             })
         return sanitized_data[:20]
 
     def analyze_deployment_frequency(self, history):
-        """Analyze deployment patterns from commit history object"""
+        """Analyze deployment patterns"""
         now = datetime.now(timezone.utc)
         ninety_days_ago = now - timedelta(days=90)
 
