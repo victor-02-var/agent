@@ -1,0 +1,10 @@
+langgraph
+google-genai
+ollama
+python-dotenv
+GitPython
+supabase
+pydriller
+radon
+requests
+typing-extensions
