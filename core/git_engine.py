@@ -8,7 +8,6 @@ from radon.complexity import cc_visit
 class GitForensics:
     def __init__(self, repo_url):
         """Initialize using GitHub API instead of local cloning"""
-        # Parse URL to get owner and repo name
         parts = repo_url.rstrip('/').replace('.git', '').split('/')
         self.owner = parts[-2]
         self.repo_name = parts[-1]
@@ -31,8 +30,8 @@ class GitForensics:
         """Comprehensive API-based repository analysis"""
         print(f"🌐 [API Miner] Analyzing {self.owner}/{self.repo_name}...")
         
-        # 1. Fetch recent commits
-        commits = self._get("/commits?per_page=50")
+        # 1. Fetch recent commits (Increased per_page for better leaderboard)
+        commits = self._get("/commits?per_page=100") 
         raw_history = []
         hotspots = {}
         bug_commits_count = 0
@@ -40,6 +39,7 @@ class GitForensics:
 
         if commits:
             for c in commits:
+                author_login = c.get('author', {}).get('login') if c.get('author') else "Unknown"
                 msg = c['commit']['message']
                 date_str = c['commit']['author']['date']
                 date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
@@ -48,14 +48,13 @@ class GitForensics:
                 if is_bug:
                     bug_commits_count += 1
                 
-                # We keep the raw message here so the sanitizer can see it later
                 raw_history.append({
                     'date': date_obj, 
                     'msg': msg, 
+                    'author': author_login,
                     'num_files': 1 
                 })
                 
-                # Sample hotspots from the latest commits
                 if len(raw_history) <= 5:
                     detail = self._get(f"/commits/{c['sha']}")
                     if detail:
@@ -63,10 +62,10 @@ class GitForensics:
                             path = f['filename']
                             hotspots[path] = hotspots.get(path, 0) + 1
 
-        # 2. Sanitize logs for AI (This is where the Sanitizer Agent will look)
+        # 2. Advanced Analysis Modules
+        leaderboard = self.get_collaborator_leaderboard(raw_history)
+        dependency_risks = self.analyze_dependencies() # <--- NEW: Dependency Scan
         sanitized = self.sanitize_logs(raw_history)
-
-        # 3. Complexity analysis
         avg_cc = self._get_complexity_via_api(hotspots)
 
         return {
@@ -74,11 +73,54 @@ class GitForensics:
             "overall_complexity": {"avg_cc": avg_cc},
             "deployment_frequency": self.analyze_deployment_frequency(raw_history),
             "bug_patterns": {"total_bug_fixes": bug_commits_count},
-            "sanitized_history": sanitized # <--- The Sanitizer Agent scans this list
+            "sanitized_history": sanitized,
+            "leaderboard": leaderboard,
+            "dependency_risks": dependency_risks # <--- Added to return object
         }
 
+    def analyze_dependencies(self):
+        """Scans for compromised or outdated critical packages in requirements.txt"""
+        # Demo Vulnerability Database
+        vulnerability_db = {
+            "requests": {"version": "2.25.0", "risk": "High", "issue": "Credential Leakage via Proxy"},
+            "flask": {"version": "1.1.2", "risk": "Critical", "issue": "Remote Code Execution (RCE)"},
+            "django": {"version": "2.2.10", "risk": "High", "issue": "SQL Injection vulnerability"},
+            "lodash": {"version": "4.17.15", "risk": "Medium", "issue": "Prototype Pollution"}
+        }
+        
+        # Attempt to fetch requirements.txt from root
+        file_data = self._get("/contents/requirements.txt")
+        alerts = []
+
+        if file_data and 'content' in file_data:
+            try:
+                content = base64.b64decode(file_data['content']).decode('utf-8')
+                for package, info in vulnerability_db.items():
+                    # Check for exact version match (e.g., flask==1.1.2)
+                    if f"{package}=={info['version']}" in content:
+                        alerts.append({
+                            "package": package,
+                            "version": info['version'],
+                            "risk": info['risk'],
+                            "issue": info['issue']
+                        })
+                print(f"🛡️ [Dependency Guard] Found {len(alerts)} security risks.")
+            except Exception as e:
+                print(f"⚠️ Error parsing dependencies: {e}")
+        
+        return alerts
+
+    def get_collaborator_leaderboard(self, history):
+        stats = {}
+        for entry in history:
+            user = entry['author']
+            if user and user.lower() != self.owner.lower() and user != "Unknown":
+                stats[user] = stats.get(user, 0) + 1
+        
+        sorted_stats = sorted(stats.items(), key=lambda x: x[1], reverse=True)
+        return [{"username": user, "commits": count} for user, count in sorted_stats]
+
     def _get_complexity_via_api(self, hotspots):
-        """Fetches file content via API and runs CC analysis in memory"""
         top_files = sorted(hotspots.items(), key=lambda x: x[1], reverse=True)[:3]
         total_cc = 0
         count = 0
@@ -99,25 +141,23 @@ class GitForensics:
         return round(total_cc / max(count, 1), 2)
 
     def sanitize_logs(self, raw_commits):
-        """Pre-processes logs. NOTE: We keep the message intact so the Sanitizer Agent can scan for keys."""
         sanitized_data = []
-        # We removed 'readme' and 'docs' from noise so we don't accidentally skip a leak in those files
         noise_patterns = [r"merge branch", r"merge pull request"]
         
         for commit in raw_commits:
-            msg = commit['msg'] # Keep original casing for token detection
+            msg = commit['msg']
             if any(re.search(pattern, msg.lower()) for pattern in noise_patterns):
                 continue
             
             sanitized_data.append({
                 "date": str(commit['date']),
-                "message": msg, # <--- Changed from 'impact' to 'message' for clarity
+                "message": msg,
+                "author": commit['author'],
                 "files_count": commit['num_files']
             })
         return sanitized_data[:20]
 
     def analyze_deployment_frequency(self, history):
-        """Analyze deployment patterns"""
         now = datetime.now(timezone.utc)
         ninety_days_ago = now - timedelta(days=90)
 
