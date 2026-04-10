@@ -1,4 +1,5 @@
 import os
+import json
 import requests
 from flask import Flask, redirect, request, session, render_template_string
 from agents.supervisor import app as langgraph_app
@@ -73,6 +74,53 @@ def callback():
         </div>
     ''', options=options)
 
+@app.route('/webhook', methods=['POST'])
+def github_webhook():
+    # 1. Capture the incoming data from GitHub
+    payload = request.json
+    if not payload:
+        return jsonify({"msg": "No payload received"}), 400
+
+    # 2. Check if this is a 'Pull Request' event
+    # GitHub sends different 'actions'. We want 'opened' or 'synchronize' (update)
+    action = payload.get("action")
+    if action in ["opened", "synchronize", "reopened"]:
+        repo_url = payload['repository']['html_url']
+        pr_title = payload['pull_request']['title']
+        sender = payload['sender']['login']
+
+        print(f"🚀 [Sentinel] PR Detected: '{pr_title}' by {sender}")
+        print(f"🔍 Analyzing: {repo_url}")
+
+        # 3. Initialize the Agent State
+        # We pass the repo_url just like we did in the manual audit
+        initial_state = {
+            "repo_path": repo_url,
+            "raw_metrics": {},
+            "health_score": 0,
+            "analytics": {},
+            "security_alerts": [],
+            "cloud_analysis": "",
+            "final_report": ""
+        }
+
+        # 4. Trigger the LangGraph Workflow
+        try:
+            # We use 'app.invoke' or 'app.stream' from your supervisor.py
+            final_output = langgraph_app.invoke(initial_state)
+            
+            # 5. Check for Critical Alerts to trigger the Email
+            # The 'send_security_alert' function we built will fire here
+            # if the Miner finds flask==1.1.2 in requirements.txt
+            
+            print(f"✅ Auto-Audit Complete for {repo_url}")
+            return jsonify({"status": "success", "msg": "Audit triggered"}), 200
+            
+        except Exception as e:
+            print(f"❌ Webhook Audit Failed: {e}")
+            return jsonify({"status": "error", "msg": str(e)}), 500
+
+    return jsonify({"msg": "Event ignored"}), 200
 @app.route('/audit', methods=['POST'])
 def audit():
     repo_url = request.form.get('repo_url')
