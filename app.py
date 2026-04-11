@@ -4,9 +4,9 @@ import threading
 import json
 import re
 import requests
-from flask import Flask, redirect, request, session, jsonify, render_template_string
+from flask import Flask, redirect, request, session, jsonify, render_template_string, send_file
 from flask_cors import CORS
-from agents.supervisor import app as langgraph_app, SentinelVault  # Added SentinelVault import
+from agents.supervisor import app as langgraph_app, SentinelVault 
 from core.database import AuditDatabase
 from dotenv import load_dotenv
 
@@ -20,6 +20,13 @@ CORS(app, resources={r"/*": {"origins": ["http://localhost:5173", "http://localh
 # GitHub Credentials
 CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
+
+# --- HELPER: RECURSIVE DICT UNWRAPPER ---
+def force_dict(obj):
+    """Drills through any depth of lists to find a dictionary."""
+    while isinstance(obj, list) and len(obj) > 0:
+        obj = obj[0]
+    return obj if isinstance(obj, dict) else {}
 
 # --- AUTH ROUTES ---
 
@@ -63,15 +70,16 @@ def callback():
 
 # --- EXTERNAL API ENDPOINTS ---
 
-@app.route('/api/v1/health-badge/<repo_name>', methods=['GET'])
+@app.route('/api/v1/health-badge/<path:repo_name>', methods=['GET'])
 def get_health_badge(repo_name):
     """API for external dashboards to show project health status"""
     db = AuditDatabase()
-    report = db.get_latest_report(repo_name)
+    clean_name = os.path.basename(repo_name)
+    report = db.get_latest_audit(clean_name)
     if not report: return jsonify({"error": "No audit found"}), 404
     
     return jsonify({
-        "repo": repo_name,
+        "repo": clean_name,
         "health_score": report['health_score'],
         "status": "HEALTHY" if report['health_score'] > 75 else "BANKRUPT",
         "color": "#2ea44f" if report['health_score'] > 75 else "#FF4757"
@@ -79,33 +87,120 @@ def get_health_badge(repo_name):
 
 @app.route('/api/v1/heatmap/<path:repo_name>', methods=['GET'])
 def get_heatmap_data(repo_name):
-    """Provides Heatmap coordinates based on Churn and Entropy"""
     db = AuditDatabase()
     vault = SentinelVault()
-    report = db.get_latest_report(repo_name)
     
-    if not report:
-        return jsonify({"error": "No audit found"}), 404
+    # 1. Database Fetch
+    raw_db_result = db.get_latest_audit(repo_name) or db.get_latest_audit(os.path.basename(repo_name))
+    
+    # --- CRITICAL FIX START: UNWRAP THE DB LIST ---
+    report = raw_db_result
+    while isinstance(report, list) and len(report) > 0:
+        report = report[0]
+    # --- CRITICAL FIX END ---
+
+    if not report or not isinstance(report, dict):
+        return jsonify([])
     
     try:
-        # DECRYPT RAW METRICS
+        # 2. Decrypt with Safety
+        # Use report['key'] if it's a dict, or report.get()
+        metrics_blob = report.get('raw_metrics', '{}')
+        decrypted = vault.decrypt_data(metrics_blob)
+        data_packet = json.loads(decrypted)
+        
+        # Recursive Peel Helper
+        def peel(obj):
+            while isinstance(obj, list) and len(obj) > 0:
+                obj = obj[0]
+            return obj
+
+        analytics = peel(data_packet)
+        if not isinstance(analytics, dict):
+            return jsonify([])
+
+        # 3. Target Entropy
+        entropy = analytics.get('entropy', analytics.get('knowledge_silos', {}))
+        entropy = peel(entropy)
+
+        heatmap_results = []
+        if isinstance(entropy, dict):
+            for path, stats in entropy.items():
+                s = peel(stats)
+                if not isinstance(s, dict): continue
+
+                heatmap_results.append({
+                    "file": path,
+                    "touches": s.get('total_touches', 1),
+                    "concentration": s.get('author_concentration', 100),
+                    "owner": s.get('primary_owner', 'Lead Dev'),
+                    "value": int(s.get('total_touches', 1) * 2) 
+                })
+            
+        return jsonify(heatmap_results)
+
+    except Exception as e:
+        print(f"❌ Heatmap Final Safety Triggered: {str(e)}")
+        return jsonify([])
+
+@app.route('/api/v1/contributor-audit/<path:repo_name>', methods=['GET'])
+def get_contributor_audit(repo_name):
+    """Analyzes the top contributor's impact, frequency, and code quality."""
+    db = AuditDatabase()
+    vault = SentinelVault()
+    clean_name = os.path.basename(repo_name)
+    report = db.get_latest_audit(clean_name)
+    
+    if not report:
+        return jsonify({"error": f"Audit not found for {clean_name}"}), 404
+    
+    try:
         raw_encrypted = report.get('raw_metrics', '{}')
         decrypted_metrics = vault.decrypt_data(raw_encrypted)
-        analytics = json.loads(decrypted_metrics)
+        analytics = force_dict(json.loads(decrypted_metrics))
         
-        entropy_data = analytics.get('entropy', {})
-        heatmap = []
-        for path, stats in entropy_data.items():
-            churn_factor = min(50, stats.get('total_touches', 0) * 5)
-            entropy_factor = stats.get('author_concentration', 0) * 0.5
-            heat_score = int(churn_factor + entropy_factor)
-            
-            heatmap.append({
-                "file": path, "value": heat_score, "touches": stats.get('total_touches'),
-                "concentration": stats.get('author_concentration'), "is_silo": stats.get('is_knowledge_silo'),
-                "owner": stats.get('primary_owner')
-            })
-        return jsonify(sorted(heatmap, key=lambda x: x['value'], reverse=True))
+        leaderboard = analytics.get('leaderboard', [])
+        if not leaderboard:
+            return jsonify({"error": "No contributor data available"}), 404
+        
+        mvp = force_dict(leaderboard[0])
+        mvp_name = mvp.get('author', 'Unknown')
+        
+        total_commits = sum([force_dict(d).get('commits', 0) for d in leaderboard])
+        mvp_commits = mvp.get('commits', 0)
+        contribution_share = (mvp_commits / total_commits) * 100 if total_commits > 0 else 0
+        
+        avg_cc = analytics.get('overall_complexity', {}).get('avg_cc', 10)
+        quality_score = max(5, 100 - (avg_cc * 4)) 
+
+        return jsonify({
+            "contributor": mvp_name,
+            "metrics": {
+                "commit_count": mvp_commits,
+                "project_share": f"{int(contribution_share)}%",
+                "work_frequency": "High" if contribution_share > 30 else "Balanced",
+                "quality_index": f"{int(quality_score)}/100",
+                "risk_factor": "Critical" if contribution_share > 50 else "Low"
+            },
+            "status": "Elite" if quality_score > 80 else "Technical Debt Driver"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/v1/branch-stats/<path:repo_name>', methods=['GET'])
+def get_branch_stats(repo_name):
+    """Fetches branch count for 3D dependency mapping motive."""
+    token = os.getenv("GITHUB_TOKEN")
+    headers = {"Authorization": f"token {token}"}
+    url = f"https://api.github.com/repos/{repo_name}/branches"
+    
+    try:
+        res = requests.get(url, headers=headers)
+        branches = res.json()
+        return jsonify({
+            "total_branches": len(branches) if isinstance(branches, list) else 0,
+            "repo_path": repo_name
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -114,23 +209,23 @@ def get_timeline_data(repo_name):
     """Provides dynamic 90-day risk milestones based on health score"""
     db = AuditDatabase()
     vault = SentinelVault()
-    report = db.get_latest_report(repo_name)
+    clean_name = os.path.basename(repo_name)
+    report = db.get_latest_audit(clean_name)
     
     if not report:
         return jsonify({"error": "No audit found"}), 404
     
     try:
-        # DECRYPT RAW METRICS
         raw_encrypted = report.get('raw_metrics', '{}')
         decrypted_metrics = vault.decrypt_data(raw_encrypted)
-        analytics = json.loads(decrypted_metrics)
+        analytics = force_dict(json.loads(decrypted_metrics))
         
         health_score = report.get('health_score', 0)
         timeline = analytics.get('timeline', [])
         show_timeline = analytics.get('show_timeline', health_score < 75)
         
         return jsonify({
-            "repo": repo_name,
+            "repo": clean_name,
             "health_score": health_score,
             "show_timeline": show_timeline,
             "timeline": timeline,
@@ -144,21 +239,21 @@ def get_financial_risk(repo_name):
     """API for Executive Dashboard to pull financial loss metrics"""
     db = AuditDatabase()
     vault = SentinelVault()
-    report = db.get_latest_report(repo_name)
+    clean_name = os.path.basename(repo_name)
+    report = db.get_latest_audit(clean_name)
     
     if not report:
-        return jsonify({"error": "No audit found for this repository"}), 404
+        return jsonify({"error": f"No audit found for {clean_name}"}), 404
     
     try:
-        # DECRYPT RAW METRICS & FINAL REPORT
         raw_encrypted_metrics = report.get('raw_metrics', '{}')
         decrypted_metrics = vault.decrypt_data(raw_encrypted_metrics)
-        analytics = json.loads(decrypted_metrics)
+        analytics = force_dict(json.loads(decrypted_metrics))
 
         raw_encrypted_report = report.get('report_text', '{}')
         decrypted_report = vault.decrypt_data(raw_encrypted_report)
         try:
-            exec_summary = json.loads(decrypted_report)
+            exec_summary = force_dict(json.loads(decrypted_report))
         except:
             exec_summary = decrypted_report
         
@@ -172,8 +267,49 @@ def get_financial_risk(repo_name):
             "decryption_verified": True
         })
     except Exception as e:
-        print(f"Error parsing finance data: {e}")
         return jsonify({"error": "Decryption failed"}), 500
+
+@app.route('/api/v1/report/download/<path:repo_name>', methods=['GET'])
+def download_report(repo_name):
+    db = AuditDatabase()
+    vault = SentinelVault()
+    clean_name = os.path.basename(repo_name)
+    
+    try:
+        report = db.get_latest_audit(clean_name)
+    except Exception as e:
+        print(f"🔄 Database Connection Reset: {e}. Retrying...")
+        db = AuditDatabase()
+        report = db.get_latest_audit(clean_name)
+    
+    if not report:
+        return jsonify({"error": "No audit found. Run a fresh audit first."}), 404
+
+    try:
+        raw_metrics_encrypted = report.get('raw_metrics', '{}')
+        decrypted_metrics = vault.decrypt_data(raw_metrics_encrypted)
+        analytics_raw = json.loads(decrypted_metrics)
+        
+        raw_report_encrypted = report.get('report_text', '{}')
+        decrypted_report = vault.decrypt_data(raw_report_encrypted)
+        try:
+            exec_raw = json.loads(decrypted_report)
+        except:
+            exec_raw = {"executive_summary": str(decrypted_report)}
+
+        clean_analytics = force_dict(analytics_raw)
+        clean_exec = force_dict(exec_raw)
+
+        combined_payload = {**clean_analytics, "executive_summary": clean_exec}
+
+        from core.reporter import generate_pdf_report
+        pdf_path = generate_pdf_report(clean_name, combined_payload)
+        
+        return send_file(os.path.abspath(pdf_path), as_attachment=True)
+        
+    except Exception as e:
+        print(f"❌ PDF FATAL ERROR: {str(e)}")
+        return jsonify({"error": f"Report Engine Failure: {str(e)}"}), 500
 
 @app.route('/api/analyze', methods=['POST'])
 def analyze_repo():
@@ -188,8 +324,6 @@ def analyze_repo():
         
         os.environ["GITHUB_TOKEN"] = token
         repo_url = f"https://github.com/{repo_full_name}"
-        
-        # Capture optional financial config from CEO UI
         fin_config = data.get('financial_config', {"avg_salary": 8000, "cost_per_bug": 500})
 
         initial_state = {
@@ -234,15 +368,14 @@ def analyze_repo():
             "metrics": {
                 "total_issues": len(formatted_alerts),
                 "files_analyzed": len(raw_metrics.get('churn_metrics', {})),
-                "lines_of_code": sum([max(0, int(stats.get('total_touches', 0)) * 15) for stats in raw_metrics.get('entropy', {}).values()])
+                "lines_of_code": sum([max(0, int(force_dict(stats).get('total_touches', 0)) * 15) for stats in raw_metrics.get('entropy', {}).values()])
             },
             "financials": raw_metrics.get('revenue_model', {}),
             "knowledge_silos": raw_metrics.get('entropy', {}),
             "security_alerts": formatted_alerts,
             "executive_summary": accumulated_data['final_report'],
             "raw_analysis": accumulated_data['cloud_analysis'],
-            "analytics": raw_metrics,
-            "raw_metrics": {"overall_complexity": {"avg_cc": 10}, "bug_patterns": {"total_bug_fixes": 0}} # Mock for UI safety
+            "analytics": raw_metrics
         }
         
         return jsonify(result), 200
@@ -250,7 +383,7 @@ def analyze_repo():
     except Exception as e:
         print(f"❌ Analysis Error: {str(e)}")
         return jsonify({"error": str(e), "status": "error"}), 500
-    
+
 @app.route('/api/repos', methods=['GET'])
 def get_user_repos():
     token = request.headers.get('Authorization', '').replace('Bearer ', '')
@@ -269,51 +402,42 @@ def github_webhook():
     payload = request.json
     event_type = request.headers.get('X-GitHub-Event')
     
-    # Trigger on Pull Requests or new Pushes to those PRs
     if event_type == "pull_request":
         action = payload.get("action")
         if action in ["opened", "synchronize", "reopened"]:
             repo_full_name = payload['repository']['full_name']
             repo_url = payload['repository']['clone_url']
-            
-            # Extract the specific branch being merged
             branch = payload['pull_request']['head']['ref']
             
             print(f"🚀 [Autonomous] PR Event: {repo_full_name} | Branch: {branch}")
             
-            # Start the AI Audit in the background
             thread = threading.Thread(
                 target=run_background_audit, 
                 args=(repo_full_name, branch, repo_url)
             )
             thread.start()
-            
             return jsonify({"status": "Autonomous Audit Triggered"}), 202
 
     return jsonify({"status": "Event Ignored"}), 200
 
 def run_background_audit(repo_name, branch, repo_url):
-    """Executes the full LangGraph pipeline without human intervention"""
     print(f"🤖 [Agentic OS] Starting Unsupervised Audit for {repo_name}...")
-    
-    # We pass the branch name so the Miner knows exactly which code to audit
     initial_state = {
         "repo_path": repo_url,
-        "branch": branch, # Ensure your GitForensics class can handle branch switching
+        "branch": branch,
         "raw_metrics": {}, 
         "health_score": 0,
         "analytics": {}, 
         "security_alerts": [], 
         "cloud_analysis": "", 
         "final_report": "",
-        "financial_config": {"avg_salary": 8000, "cost_per_bug": 500} # Auto-config for CEO
+        "financial_config": {"avg_salary": 8000, "cost_per_bug": 500}
     }
-    
     try:
-        # This will run all nodes: Mine -> Sanitize -> Predict -> Report (Save to DB & Telegram)
         langgraph_app.invoke(initial_state)
         print(f"✅ [Autonomous] Success: DB Updated & Telegram Sent for {repo_name}")
     except Exception as e:
         print(f"❌ [Autonomous] Critical Failure: {str(e)}")
+
 if __name__ == '__main__':
     app.run(port=5000, debug=True)

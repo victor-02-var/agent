@@ -22,14 +22,10 @@ load_dotenv()
 # --- CRYPTOGRAPHIC VAULT UTILITY (With Self-Healing Fallback) ---
 class SentinelVault:
     def __init__(self):
-        # 1. Fetch key from .env and strip any hidden whitespace
         key_raw = os.getenv("SENTINEL_MASTER_KEY", "").strip()
-        
-        # 2. EMERGENCY FALLBACK: If .env key is invalid/missing, use your provided key
         if not key_raw or len(key_raw) < 32:
             key_raw = "PFlPu_iDI78Z1__kqpYo_bFBYJ82_9EMHEMPp6597vQ="
             print("💡 Vault: Using hardcoded fallback key for encryption.")
-
         try:
             self.cipher = Fernet(key_raw.encode())
         except Exception as e:
@@ -89,12 +85,13 @@ def sanitize_git_logs(logs):
         })
     return sanitized
 
-# --- Agent 1: The Forensic Miner ---
+# --- Agent 1: The Forensic Miner (With Financial Forecasting Engine) ---
 def forensic_node(state: AgentState):
     print("🔍 [Agent: Miner] Performing Deep Multi-Vector Audit...")
     engine = GitForensics(state['repo_path'])
     metrics = engine.analyze_all()
     
+    # Extraction
     metrics['sanitized_history'] = sanitize_git_logs(metrics.get('sanitized_history', []))
     avg_cc = metrics.get('overall_complexity', {}).get('avg_cc', 0)
     hotspots = metrics.get('churn_metrics', {})
@@ -103,6 +100,7 @@ def forensic_node(state: AgentState):
     entropy_map = metrics.get('entropy_map', {})
     dep_risks = metrics.get('dependency_risks', [])
     
+    # Basic Logic Scores
     logic_density = max(5, 100 - (avg_cc * 12))
     stability_score = max(5, 100 - (bug_fixes * 8))
     volatile_files = len([v for v in hotspots.values() if v > 3])
@@ -118,24 +116,40 @@ def forensic_node(state: AgentState):
     bus_factor = max(1, total_devs - len(silo_owners))
     momentum_score = min(100, max(5, deploy_freq * 25))
 
+    # --- FINANCIAL FORECASTING ENGINE LOGIC ---
     config = state.get('financial_config', {})
     AVG_DEV_SALARY = config.get('avg_salary', 8000) 
     COST_PER_BUG = config.get('cost_per_bug', 500)
 
-    tech_tax_ratio = min(0.7, (avg_cc / 20))
-    monthly_loss_complexity = AVG_DEV_SALARY * tech_tax_ratio
-    monthly_loss_bugs = bug_fixes * COST_PER_BUG
-    total_leak = int(monthly_loss_complexity + monthly_loss_bugs)
+    # 1. Maintenance Tax (Complexity Tax)
+    complexity_penalty = min(0.5, (avg_cc / 30)) 
+    monthly_complexity_loss = AVG_DEV_SALARY * complexity_penalty
 
+    # 2. Operational Waste (Churn Loss)
+    total_touches = sum([v for v in hotspots.values()])
+    churn_loss = (total_touches * 50) 
+
+    # 3. Stability Drain (Bug Leak)
+    stability_leak = bug_fixes * COST_PER_BUG
+
+    # 4. Total Monthly Loss calculation (FIXED VARIABLE NAMES HERE)
+    total_leak = int(monthly_complexity_loss + churn_loss + stability_leak)
+
+    # 5. Final Health calculation
     raw_health = (logic_density * 0.4) + (stability_score * 0.3) + (modularity_score * 0.2) + (momentum_score * 0.1)
     final_health = max(5, int(raw_health - silo_penalty))
 
+    # 6. Predictive ROI (Profit Recovery)
+    current_efficiency = final_health / 100
+    potential_savings = total_leak * (0.90 - current_efficiency) if current_efficiency < 0.9 else 0
+
+    # --- DYNAMIC 90-DAY TIMELINE ---
     dynamic_timeline = []
     now = datetime.now()
     show_timeline = final_health < 75
 
     narratives = {
-        "m1": { "neglect": f"System instability will peak. Unresolved {bug_fixes} bugs will likely cause a production outage.", "resolve": f"Stability recovered. Bug backlog cleared, reducing technical tax by ${monthly_loss_bugs}." },
+        "m1": { "neglect": f"System instability will peak. Unresolved {bug_fixes} bugs will likely cause a production outage.", "resolve": f"Stability recovered. Bug backlog cleared, reducing technical tax by ${stability_leak}." },
         "m2": { "neglect": f"Knowledge Silo Crisis. {silo_count} files are now unmaintainable due to primary owner burnout.", "resolve": "Knowledge distribution complete. Bus factor increased, securing project continuity." },
         "m3": { "neglect": "Technical Bankruptcy. The cost of maintenance now exceeds the value of new features.", "resolve": "Architecture optimized. The project is now a high-velocity asset for the business." }
     }
@@ -156,13 +170,22 @@ def forensic_node(state: AgentState):
     analytics_payload = {
         "score": final_health, "show_timeline": show_timeline, "timeline": dynamic_timeline, "narratives": narratives,
         "vectors": {"logic_density": int(logic_density), "stability": int(stability_score), "modularity": int(modularity_score), "momentum": int(momentum_score)},
-        "revenue_model": {"monthly_loss_total": total_leak, "tech_tax": int(monthly_loss_complexity), "stability_leak": int(monthly_loss_bugs), "efficiency": f"{int(final_health * 0.9)}%"},
+        "revenue_model": {"monthly_loss_total": total_leak, "tech_tax": int(monthly_complexity_loss), "stability_leak": int(stability_leak), "efficiency": f"{int(final_health)}%"},
+        "financial_forecasting": {
+            "monthly_leak": total_leak,
+            "annual_burn": total_leak * 12,
+            "complexity_tax": int(monthly_complexity_loss),
+            "churn_waste": int(churn_loss),
+            "stability_drain": int(stability_leak),
+            "potential_recovery_roi": int(potential_savings),
+            "efficiency_multiplier": f"{int(final_health)}%"
+        },
         "bus_factor": {"score": bus_factor, "status": "Critical" if bus_factor < 2 else "Warning" if bus_factor < 4 else "Healthy"},
         "cloud_billing": {"is_aws": is_aws, "current_monthly_bill": base_bill, "projected_bill_after_pr": base_bill + projected_delta, "delta": projected_delta},
         "entropy": entropy_map, "dependency_risks": dep_risks
     }
 
-    print(f"✅ Audit Complete. Health: {final_health}/100 | Timeline: {show_timeline}")
+    print(f"✅ Audit Complete. Health: {final_health}/100 | ROI Risk: ${total_leak}")
     return {"raw_metrics": metrics, "health_score": final_health, "analytics": analytics_payload}
 
 # --- Agent: Sanitizer ---
@@ -208,7 +231,6 @@ def ceo_report_node(state: AgentState):
     DATA:
     - Health Score: {state['health_score']}/100
     - Monthly Revenue Leak: ${rev_data['monthly_loss_total']}
-    - Bug Issues: {bug_fixes}
     - Technical Entropy: {complexity}
 
     REQUIRED JSON SCHEMA:
@@ -238,7 +260,6 @@ def ceo_report_node(state: AgentState):
     
     # --- CRYPTOGRAPHIC VAULT LAYER ---
     vault = SentinelVault()
-    print("🔐 [Vault] Encrypting Executive Report & Metrics with AES-256...")
     encrypted_report = vault.encrypt_data(report_content)
     encrypted_analytics = vault.encrypt_data(json.dumps(state['analytics']))
 
