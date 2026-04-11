@@ -1,5 +1,4 @@
 langgraph
-google-genai
 ollama
 python-dotenv
 GitPython
@@ -8,3 +7,5 @@ pydriller
 radon
 requests
 typing-extensions
+Flask
+flask-cors
